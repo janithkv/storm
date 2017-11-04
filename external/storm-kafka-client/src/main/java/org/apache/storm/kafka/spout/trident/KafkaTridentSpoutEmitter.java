@@ -18,10 +18,20 @@
 
 package org.apache.storm.kafka.spout.trident;
 
-import static org.apache.storm.kafka.spout.KafkaSpoutConfig.FirstPollOffsetStrategy.EARLIEST;
-import static org.apache.storm.kafka.spout.KafkaSpoutConfig.FirstPollOffsetStrategy.LATEST;
-import static org.apache.storm.kafka.spout.KafkaSpoutConfig.FirstPollOffsetStrategy.UNCOMMITTED_EARLIEST;
-import static org.apache.storm.kafka.spout.KafkaSpoutConfig.FirstPollOffsetStrategy.UNCOMMITTED_LATEST;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.UnsupportedVersionException;
+import org.apache.storm.kafka.spout.KafkaSpoutConfig;
+import org.apache.storm.kafka.spout.RecordTranslator;
+import org.apache.storm.kafka.spout.internal.Timer;
+import org.apache.storm.task.TopologyContext;
+import org.apache.storm.trident.operation.TridentCollector;
+import org.apache.storm.trident.spout.IOpaquePartitionedTridentSpout;
+import org.apache.storm.trident.topology.TransactionAttempt;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -34,19 +44,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.common.TopicPartition;
-import org.apache.storm.kafka.spout.KafkaSpoutConfig;
-import org.apache.storm.kafka.spout.RecordTranslator;
-import org.apache.storm.kafka.spout.internal.Timer;
-import org.apache.storm.task.TopologyContext;
-import org.apache.storm.trident.operation.TridentCollector;
-import org.apache.storm.trident.spout.IOpaquePartitionedTridentSpout;
-import org.apache.storm.trident.topology.TransactionAttempt;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+
+import static org.apache.storm.kafka.spout.KafkaSpoutConfig.FirstPollOffsetStrategy.EARLIEST;
+import static org.apache.storm.kafka.spout.KafkaSpoutConfig.FirstPollOffsetStrategy.LATEST;
+import static org.apache.storm.kafka.spout.KafkaSpoutConfig.FirstPollOffsetStrategy.TIMESTAMP;
+import static org.apache.storm.kafka.spout.KafkaSpoutConfig.FirstPollOffsetStrategy.UNCOMMITTED_EARLIEST;
+import static org.apache.storm.kafka.spout.KafkaSpoutConfig.FirstPollOffsetStrategy.UNCOMMITTED_LATEST;
 
 public class KafkaTridentSpoutEmitter<K, V> implements IOpaquePartitionedTridentSpout.Emitter<
         List<Map<String, Object>>,
@@ -66,6 +69,7 @@ public class KafkaTridentSpoutEmitter<K, V> implements IOpaquePartitionedTrident
     private final Map<TopicPartition, Long> firstPollTransaction = new HashMap<>(); 
 
     // Declare some KafkaTridentSpoutManager references for convenience
+    private final long startTimeStamp;
     private final long pollTimeoutMs;
     private final KafkaSpoutConfig.FirstPollOffsetStrategy firstPollOffsetStrategy;
     private final RecordTranslator<K, V> translator;
@@ -91,6 +95,7 @@ public class KafkaTridentSpoutEmitter<K, V> implements IOpaquePartitionedTrident
         final KafkaSpoutConfig<K, V> kafkaSpoutConfig = kafkaManager.getKafkaSpoutConfig();
         this.pollTimeoutMs = kafkaSpoutConfig.getPollTimeoutMs();
         this.firstPollOffsetStrategy = kafkaSpoutConfig.getFirstPollOffsetStrategy();
+        this.startTimeStamp = kafkaSpoutConfig.getStartTimeStamp();
         LOG.debug("Created {}", this.toString());
     }
 
@@ -99,7 +104,8 @@ public class KafkaTridentSpoutEmitter<K, V> implements IOpaquePartitionedTrident
      */
     public KafkaTridentSpoutEmitter(KafkaTridentSpoutManager<K, V> kafkaManager, TopologyContext topologyContext) {
         this(kafkaManager, topologyContext, new Timer(500,
-                kafkaManager.getKafkaSpoutConfig().getPartitionRefreshPeriodMs(), TimeUnit.MILLISECONDS));
+                                                      kafkaManager.getKafkaSpoutConfig().getPartitionRefreshPeriodMs(),
+                                                      TimeUnit.MILLISECONDS));
     }
 
     @Override
@@ -188,6 +194,22 @@ public class KafkaTridentSpoutEmitter<K, V> implements IOpaquePartitionedTrident
             } else if (firstPollOffsetStrategy == UNCOMMITTED_LATEST) {
                 LOG.debug("First poll for topic partition [{}] with no last batch metadata, seeking to partition end", tp);
                 kafkaConsumer.seekToEnd(Collections.singleton(tp));
+            } else if (firstPollOffsetStrategy == TIMESTAMP) {
+                Long startTimeStampOffset = null;
+                try {
+                    startTimeStampOffset =
+                        kafkaConsumer.offsetsForTimes(Collections.singletonMap(tp, startTimeStamp)).get(tp).offset();
+                } catch (IllegalArgumentException e) {
+                    LOG.error("Illegal timestamp {} provided for tp {} ", startTimeStamp, tp.toString());
+                } catch (UnsupportedVersionException e) {
+                    LOG.error("Kafka Server do not support offsetsForTimes(), probably < 0.10.1",e);
+                }
+                if(startTimeStampOffset != null) {
+                    LOG.info("Kafka consumer offset reset for TopicPartition {}, TimeStamp {}, Offset {}", tp, startTimeStamp, startTimeStampOffset);
+                    kafkaConsumer.seek(tp, startTimeStampOffset);
+                } else {
+                    LOG.info("Kafka consumer offset reset by timestamp failed for TopicPartition {}, TimeStamp {}, Offset {}. Restart with a different Strategy ", tp, startTimeStamp, startTimeStampOffset);
+                }
             }
             firstPollTransaction.put(tp, transactionId);
         } else {

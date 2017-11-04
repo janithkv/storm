@@ -18,14 +18,6 @@
 
 package org.apache.storm.kafka.spout;
 
-import java.io.Serializable;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
-import java.util.regex.Pattern;
-
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -38,6 +30,14 @@ import org.apache.storm.kafka.spout.subscription.RoundRobinManualPartitioner;
 import org.apache.storm.kafka.spout.subscription.Subscription;
 import org.apache.storm.tuple.Fields;
 
+import java.io.Serializable;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.regex.Pattern;
+
 /**
  * KafkaSpoutConfig defines the required configuration to connect a consumer to a consumer group, as well as the subscribing topics.
  */
@@ -46,6 +46,8 @@ public class KafkaSpoutConfig<K, V> implements Serializable {
     private static final long serialVersionUID = 141902646130682494L;
     // 200ms
     public static final long DEFAULT_POLL_TIMEOUT_MS = 200;
+    // 0
+    public static final long DEFAULT_START_TS = 0;
     // 30s
     public static final long DEFAULT_OFFSET_COMMIT_PERIOD_MS = 30_000;
     // Retry forever
@@ -65,6 +67,7 @@ public class KafkaSpoutConfig<K, V> implements Serializable {
     private final Map<String, Object> kafkaProps;
     private final Subscription subscription;
     private final long pollTimeoutMs;
+    private final long startTimeStamp;
 
     // Kafka spout configuration
     private final RecordTranslator<K, V> translator;
@@ -85,6 +88,7 @@ public class KafkaSpoutConfig<K, V> implements Serializable {
         this.kafkaProps = setDefaultsAndGetKafkaProps(builder.kafkaProps);
         this.subscription = builder.subscription;
         this.translator = builder.translator;
+        this.startTimeStamp = builder.startTimeStamp;
         this.pollTimeoutMs = builder.pollTimeoutMs;
         this.offsetCommitPeriodMs = builder.offsetCommitPeriodMs;
         this.firstPollOffsetStrategy = builder.firstPollOffsetStrategy;
@@ -108,6 +112,8 @@ public class KafkaSpoutConfig<K, V> implements Serializable {
      * committed, it behaves as EARLIEST.</li>
      * <li>UNCOMMITTED_LATEST means that the kafka spout polls records from the last committed offset, if any. If no offset has been
      * committed, it behaves as LATEST.</li>
+     * <li>TIMESTAMP means that the kafka spout polls records from the the earliest offset whose timestamp is greater than or equal to
+     * the startTimeStamp set in the kafka config.</li>
      * </ul>
      *
      */
@@ -115,7 +121,8 @@ public class KafkaSpoutConfig<K, V> implements Serializable {
         EARLIEST,
         LATEST,
         UNCOMMITTED_EARLIEST,
-        UNCOMMITTED_LATEST
+        UNCOMMITTED_LATEST,
+        TIMESTAMP
     }
 
     public static class Builder<K, V> {
@@ -123,6 +130,7 @@ public class KafkaSpoutConfig<K, V> implements Serializable {
         private final Map<String, Object> kafkaProps;
         private final Subscription subscription;
         private RecordTranslator<K, V> translator;
+        private long startTimeStamp = DEFAULT_START_TS;
         private long pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS;
         private long offsetCommitPeriodMs = DEFAULT_OFFSET_COMMIT_PERIOD_MS;
         private FirstPollOffsetStrategy firstPollOffsetStrategy = DEFAULT_FIRST_POLL_OFFSET_STRATEGY;
@@ -199,6 +207,15 @@ public class KafkaSpoutConfig<K, V> implements Serializable {
          */
         public Builder<K, V> setPollTimeoutMs(long pollTimeoutMs) {
             this.pollTimeoutMs = pollTimeoutMs;
+            return this;
+        }
+
+        /**
+         * Specifies the startTimeStamp if the first poll strategy is TIMESTAMP
+         * @param startTimeStamp time in ms
+         */
+        public Builder<K,V> setStartTimeStamp(long startTimeStamp) {
+            this.startTimeStamp = startTimeStamp;
             return this;
         }
 
@@ -389,6 +406,8 @@ public class KafkaSpoutConfig<K, V> implements Serializable {
         return pollTimeoutMs;
     }
 
+    public long getStartTimeStamp() { return startTimeStamp; }
+
     public long getOffsetsCommitPeriodMs() {
         return offsetCommitPeriodMs;
     }
@@ -430,6 +449,7 @@ public class KafkaSpoutConfig<K, V> implements Serializable {
     public String toString() {
         return "KafkaSpoutConfig{"
             + "kafkaProps=" + kafkaProps
+            + ", startTimeStamp=" + startTimeStamp
             + ", pollTimeoutMs=" + pollTimeoutMs
             + ", offsetCommitPeriodMs=" + offsetCommitPeriodMs
             + ", maxUncommittedOffsets=" + maxUncommittedOffsets
